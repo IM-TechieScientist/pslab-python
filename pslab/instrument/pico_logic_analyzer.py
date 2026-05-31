@@ -66,6 +66,15 @@ class LogicCapture:
         return np.arange(self.samples) * self.sample_interval_us
 
 
+@dataclass
+class LogicStreamStatus:
+    """Firmware streaming status."""
+
+    enabled: bool
+    sequence: int
+    overruns: int
+
+
 class PicoLogicAnalyzer:
     """Control the standalone Pico logic analyser firmware over USB CDC.
 
@@ -201,6 +210,60 @@ class PicoLogicAnalyzer:
         payload = self.query_block("LA:FETC?")
         return self._capture_from_payload(payload)
 
+    def stream_start(self) -> None:
+        """Start firmware repeated-capture streaming."""
+
+        self.command("LA:STREAM:START")
+
+    def stream_stop(self) -> None:
+        """Stop firmware repeated-capture streaming."""
+
+        self._write_line("LA:STREAM:STOP")
+        while True:
+            line = self._read_line()
+            if line == "OK":
+                return
+            if line.startswith("LA:STREAM:FRAME "):
+                self._read_block_payload()
+                continue
+            if line == "LA:STREAM:ERROR":
+                continue
+            raise ScpiError(line)
+
+    def stream_status(self) -> LogicStreamStatus:
+        """Return streaming status as ``enabled, sequence, overruns``."""
+
+        fields = self.query("LA:STREAM:STAT?").split(",")
+        if len(fields) != 3:
+            raise ScpiError(f"Unexpected stream status: {fields!r}")
+        return LogicStreamStatus(
+            enabled=bool(int(fields[0])),
+            sequence=int(fields[1]),
+            overruns=int(fields[2]),
+        )
+
+    def read_stream_frame(self) -> tuple[int, LogicCapture]:
+        """Read one frame emitted by ``LA:STREAM:START``.
+
+        The firmware currently streams repeated finite captures. Each frame is a
+        text header followed by one SCPI definite-length binary block.
+        """
+
+        line = self._read_line()
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != "LA:STREAM:FRAME":
+            raise ScpiError(f"Unexpected stream frame header: {line!r}")
+
+        sequence = int(fields[1])
+        payload_len = int(fields[2])
+        payload = self._read_block_payload()
+        if len(payload) != payload_len:
+            raise ScpiError(
+                f"Stream payload length mismatch: header={payload_len}, got={len(payload)}"
+            )
+
+        return sequence, self._capture_from_payload(payload)
+
     def capture(
         self,
         *,
@@ -315,6 +378,11 @@ class PicoLogicAnalyzer:
         """Send a query and read a SCPI arbitrary block response."""
 
         self._write_line(command)
+        return self._read_block_payload(timeout=timeout)
+
+    def _read_block_payload(self, timeout: float | None = ...) -> bytes:
+        """Read one SCPI arbitrary block payload."""
+
         old_timeout = self._set_timeout(timeout)
         try:
             marker = self._read_exact(1)
@@ -390,6 +458,18 @@ class PicoLogicAnalyzer:
     def _write_line(self, command: str) -> None:
         self.connect()
         self._ser.write(command.encode("ascii") + b"\n")
+
+    def _read_line(self, timeout: float | None = ...) -> str:
+        old_timeout = self._set_timeout(timeout)
+        try:
+            response = self._ser.readline()
+        finally:
+            self._restore_timeout(old_timeout)
+
+        if not response:
+            raise TimeoutError("Timed out waiting for line response.")
+
+        return response.decode("ascii", errors="replace").strip()
 
     def _read_exact(self, size: int) -> bytes:
         data = self._ser.read(size)
