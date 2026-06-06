@@ -10,6 +10,7 @@ class FakeSerial:
         self.writes = []
         self.timeout = 1
         self.is_open = True
+        self.test_square_enabled = False
 
     def write(self, data):
         self.writes.append(data)
@@ -19,6 +20,10 @@ class FakeSerial:
             self.output.extend(b"#" + str(len(size)).encode("ascii") + size)
             self.output.extend(self.payload)
             self.output.extend(b"\n")
+        elif command.startswith("TEST:SQUARE:CONF"):
+            self.test_square_enabled = True
+        elif command == "TEST:SQUARE OFF":
+            self.test_square_enabled = False
         elif command.endswith("?"):
             responses = {
                 "*IDN?": b"FOSSASIA,PSLab Pico,1.0,v0.1.0\n",
@@ -29,12 +34,10 @@ class FakeSerial:
                 "LA:CONF:TRIG:PIN?": b"16\n",
                 "LA:CONF:TRIG:LEV?": b"1\n",
                 "LA:CONF:TRIG:MODE?": b"EDGE\n",
-                "TEST:SQUARE?": b"1\n",
+                "TEST:SQUARE?": b"1\n" if self.test_square_enabled else b"0\n",
                 "SYST:ERR?": b"0,\"No error\"\n",
             }
             self.output.extend(responses[command])
-        else:
-            self.output.extend(b"OK\n")
         return len(data)
 
     def read(self, size=1):
@@ -48,6 +51,9 @@ class FakeSerial:
         except ValueError:
             end = len(self.output)
         return self.read(end)
+
+    def flush(self):
+        pass
 
     def close(self):
         self.is_open = False
@@ -107,5 +113,5 @@ def test_test_square_helpers():
     assert la.test_square_enabled()
     la.stop_test_square()
 
-    assert b"TEST:SQUARE:CONF 15 1000\n" in fake.writes
+    assert b"TEST:SQUARE:CONF 15,1000\n" in fake.writes
     assert b"TEST:SQUARE OFF\n" in fake.writes

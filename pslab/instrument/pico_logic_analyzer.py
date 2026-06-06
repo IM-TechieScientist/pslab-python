@@ -218,17 +218,7 @@ class PicoLogicAnalyzer:
     def stream_stop(self) -> None:
         """Stop firmware repeated-capture streaming."""
 
-        self._write_line("LA:STREAM:STOP")
-        while True:
-            line = self._read_line()
-            if line == "OK":
-                return
-            if line.startswith("LA:STREAM:FRAME "):
-                self._read_block_payload()
-                continue
-            if line == "LA:STREAM:ERROR":
-                continue
-            raise ScpiError(line)
+        self.command("LA:STREAM:STOP")
 
     def stream_status(self) -> LogicStreamStatus:
         """Return streaming status as ``enabled, sequence, overruns``."""
@@ -340,12 +330,16 @@ class PicoLogicAnalyzer:
     def start_test_square(self, pin: int = 15, frequency: int = 1000) -> None:
         """Start the firmware's built-in PWM square-wave test output."""
 
-        self.command(f"TEST:SQUARE:CONF {pin} {frequency}")
+        self.command(f"TEST:SQUARE:CONF {pin},{frequency}")
+        if not self.test_square_enabled():
+            raise ScpiError(self.get_error())
 
     def stop_test_square(self) -> None:
         """Stop the firmware's built-in square-wave test output."""
 
         self.command("TEST:SQUARE OFF")
+        if self.test_square_enabled():
+            raise ScpiError("Test square output did not stop.")
 
     def test_square_enabled(self) -> bool:
         """Return whether the built-in square-wave test output is enabled."""
@@ -353,11 +347,15 @@ class PicoLogicAnalyzer:
         return bool(int(self.query("TEST:SQUARE?")))
 
     def command(self, command: str, timeout: float | None = ...):
-        """Send a command that should respond with ``OK``."""
+        """Send a SCPI command that does not produce a response.
 
-        response = self.query(command, timeout=timeout)
-        if response != "OK":
-            raise ScpiError(response or self.get_error())
+        Standard SCPI setter/action commands are silent when they succeed. Use
+        :meth:`query` or :meth:`query_block` for commands ending in ``?``.
+        """
+
+        if command.rstrip().endswith("?"):
+            raise ValueError("Use query() or query_block() for SCPI queries.")
+        self._write_line(command)
 
     def query(self, command: str, timeout: float | None = ...) -> str:
         """Send a text command and read one line of response."""
@@ -458,6 +456,7 @@ class PicoLogicAnalyzer:
     def _write_line(self, command: str) -> None:
         self.connect()
         self._ser.write(command.encode("ascii") + b"\n")
+        self._ser.flush()
 
     def _read_line(self, timeout: float | None = ...) -> str:
         old_timeout = self._set_timeout(timeout)
