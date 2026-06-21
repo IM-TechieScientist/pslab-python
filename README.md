@@ -1,66 +1,144 @@
-# PSLab Python Library
+# PSLab Pico Python Tools
 
-The Python library for the [Pocket Science Lab](https://pslab.io) from FOSSASIA.
+This is a fork that is primarily intended for development and testing of the new RP2350 based PSLab.
 
-[![Build Status](https://github.com/fossasia/pslab-python/actions/workflows/workflow.yml/badge.svg)](https://github.com/fossasia/pslab-python/actions/workflows/workflow.yml)
-[![Gitter](https://badges.gitter.im/fossasia/pslab.svg)](https://gitter.im/fossasia/pslab?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/ce4af216571846308f66da4b7f26efc7)](https://www.codacy.com/app/mb/pslab-python?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=fossasia/pslab&amp;utm_campaign=Badge_Grade)
-[![Mailing List](https://img.shields.io/badge/Mailing%20List-FOSSASIA-blue.svg)](https://groups.google.com/forum/#!forum/pslab-fossasia)
-[![Twitter Follow](https://img.shields.io/twitter/follow/pslabio.svg?style=social&label=Follow&maxAge=2592000?style=flat-square)](https://twitter.com/pslabio)
+It talks to the board over USB CDC using SCPI commands and provides Python helpers for the currently
+implemented instruments:
 
-This repository hosts the Python library for communicating with the Pocket Science Lab open hardware platform (PSLab). Using this library you can communicate with the PSLab using simple Python code. The Python library is also used by the PSLab GUI as a backend component.
-
-The goal of PSLab is to create an Open Source hardware device (open on all layers) and software applications that can be used for experiments by teachers, students and scientists. Our tiny pocket lab provides an array of instruments for doing science and engineering experiments. It provides functions of numerous measurement tools including an oscilloscope, a waveform generator, a logic analyzer, a programmable voltage and current source, and even a component to control robots with up to four servos.
-
-For more information see [https://pslab.io](https://pslab.io).
-
-## Buy
-
-* You can get a Pocket Science Lab device from the [FOSSASIA Shop](https://fossasia.com).
-* More resellers are listed on the [PSLab website](https://pslab.io/shop/).
-
-## Installation
-
-pslab-python can be installed from PyPI:
-
-	$ pip install pslab
-
-**Note**: Linux users must either install a udev rule by running 'pslab install' as root, or be part of the 'dialout' group in order for pslab-python to be able to communicate with the PSLab device.
-
-**Note**: Windows users who use the PSLab v6 device must download and install the CP210x Windows Drivers from the [Silicon Labs website](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers?tab=downloads) in order for pslab-python to be able to communicate with the PSLab device.
-
-**Note**: If you are only interested in using PSLab as an acquisition device without a display/GUI, only pslab-python needs to be installed. If you would like a GUI, install the [pslab-desktop app](https://github.com/fossasia/pslab-desktop) and follow the instructions of the Readme in that repo.
+- Pico logic analyser
+- Pico oscilloscope using the internal ADC
+- Built-in test square-wave output
+- Optional ESP SPI / Wi-Fi data transport for streamed capture preview
+- Development waveform workbench GUI
 
 
-## Validate installation
+## Install
 
-1. Plug in the PSLab device and check that both the LEDs light up.
-2. The following piece of code should run without errors:
-```
-from pslab import ScienceLab
-psl = ScienceLab()
-capacitance = psl.multimeter.measure_capacitance()
-print(capacitance)
+Use a virtual environment from the repository root:
+
+```bash
+cd /home/santosh/pslab_pico/pslab-python
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -e .
+python3 -m pip install PyQt5
 ```
 
-## Communication
+For a minimal non-GUI install, `python3 -m pip install -e .` is enough.
+`PyQt5` is needed only for the waveform workbench.
 
-* If you encounter any bugs, please file them in our [issue tracker](https://github.com/fossasia/pslab-python/issues).
-* You can chat with the PSLab developers on [Gitter](https://gitter.im/fossasia/pslab).
-* There is also a [mailing list](https://groups.google.com/forum/#!forum/pslab-fossasia).
+On Linux, make sure your user can access USB CDC serial devices. Usually this
+means joining the `dialout` group:
 
-Wherever we interact, we strive to follow the [FOSSASIA Code of Conduct](https://fossasia.org/coc/).
+```bash
+sudo usermod -aG dialout "$USER"
+```
 
-## Contributing
+## Quick Logic Analyser Test
 
-See [CONTRIBUTING.md](https://github.com/fossasia/pslab-python/blob/development/CONTRIBUTING.md) to get started.
+Connect the Pico running the PSLab Pico firmware over USB.
 
-## License
+```python
+from pslab.instrument.pico_logic_analyzer import PicoLogicAnalyzer
 
-Copyright (C) 2014-2021 FOSSASIA
+la = PicoLogicAnalyzer()
+print(la.identify())
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
+la.start_test_square(pin=15, frequency=1000)
+capture = la.capture(
+    pin_base=16,
+    pin_count=1,
+    samples=1024,
+    divider=1500,
+    trigger_pin=16,
+    trigger_level=True,
+    trigger_mode="edge",
+)
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+print(capture.sample_rate)
+print(capture.states.shape)
+la.stop_test_square()
+la.disconnect()
+```
 
-You should have received a copy of the GNU General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+For this test, wire `GP15 -> GP16` and connect ground as usual.
+
+## Quick Oscilloscope Test
+
+The current Pico oscilloscope uses the RP2350 internal ADC. Channels `0..3`
+map to GPIOs `26..29`.
+
+```python
+from pslab.instrument.pico_oscilloscope import PicoOscilloscope
+
+scope = PicoOscilloscope()
+capture = scope.capture(
+    channel=0,
+    sample_rate=100_000,
+    samples=1024,
+    trigger_mode="OFF",
+)
+
+print(capture.gpio)
+print(capture.volts[:10])
+scope.disconnect()
+```
+
+## SCPI Access
+
+The Python classes expose direct SCPI helpers:
+
+```python
+from pslab.instrument.pico_logic_analyzer import PicoLogicAnalyzer
+
+dev = PicoLogicAnalyzer()
+print(dev.query("*IDN?"))
+dev.command("COMM:TRAN USB")
+print(dev.query("COMM:TRAN?"))
+print(dev.query("SYST:ERR?"))
+dev.disconnect()
+```
+
+Use `command()` for SCPI commands without a response and `query()` for commands
+ending in `?`.
+
+## Waveform Workbench GUI
+
+The main development GUI is:
+
+```bash
+cd /home/santosh/pslab_pico/pslab-python
+source .venv/bin/activate
+python3 tools/pico_waveform_workbench.py
+```
+
+The workbench supports:
+
+- USB CDC SCPI connection selection
+- Logic analyser capture and repeated capture
+- Pico ADC oscilloscope capture
+- Built-in test square-wave control
+- Trigger mode, trigger level, samples, divider/rate, channel settings
+- Zoom, scroll, fit, fullscreen, channel visibility
+- Latest-capture mode for waveform correctness
+- Rolling timeline mode for preview-style display
+- UDP receiver for ESP SPI / Wi-Fi transport frames
+- Transport selection: `USB`, `WIFI`, `AUTO`
+- Wi-Fi transport counters and stream diagnostics
+
+## ESP SPI / Wi-Fi Transport
+
+SCPI commands always go over USB CDC. Stream data can optionally be sent by the
+firmware over the Pico-to-ESP SPI bridge and forwarded by the ESP over UDP.
+
+In Python/GUI terms:
+
+1. Start the ESP bridge receiver path.
+2. Start the GUI Wi-Fi receiver.
+3. Set transport to `WIFI` or `AUTO`.
+4. Start LA or DSO repeated streaming.
+
+This transport is useful for live preview. It is not a lossless high-rate
+continuous acquisition path; dropped buffers or skipped display frames should be
+expected at higher sample rates.
