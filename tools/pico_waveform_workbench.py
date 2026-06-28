@@ -545,10 +545,16 @@ class WifiReceiver(QtCore.QThread):
     status = QtCore.pyqtSignal(str)
     failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, port: int = 5005, esp_host: str | None = None):
+    def __init__(
+        self,
+        port: int = 5005,
+        esp_host: str | None = None,
+        esp_control_port: int = 5006,
+    ):
         super().__init__()
         self.port = port
         self.esp_host = esp_host
+        self.esp_control_port = esp_control_port
         self._stop = False
         self._meta: WifiMeta | None = None
         self._chunks: dict[int, bytes] = {}
@@ -572,11 +578,20 @@ class WifiReceiver(QtCore.QThread):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("", self.port))
             sock.settimeout(0.25)
+            last_register = 0.0
             if self.esp_host:
-                sock.sendto(b"pslab-gui", (self.esp_host, self.port))
+                sock.sendto(b"PSLAB_UDP_REGISTER", (self.esp_host, self.esp_control_port))
+                last_register = time.monotonic()
             self.status.emit(f"Wi-Fi receiver listening on UDP {self.port}")
 
             while not self._stop:
+                if self.esp_host and time.monotonic() - last_register >= 1.0:
+                    sock.sendto(
+                        b"PSLAB_UDP_REGISTER",
+                        (self.esp_host, self.esp_control_port),
+                    )
+                    last_register = time.monotonic()
+
                 try:
                     packet, addr = sock.recvfrom(4096)
                 except socket.timeout:
@@ -716,9 +731,16 @@ class WifiReceiver(QtCore.QThread):
 class StreamStatusPoller(QtCore.QThread):
     status_ready = QtCore.pyqtSignal(str, str)
 
-    def __init__(self, port: str | None):
+    def __init__(
+        self,
+        port: str | None,
+        udp_host: str | None = None,
+        udp_port: int = 5006,
+    ):
         super().__init__()
         self.port = port
+        self.udp_host = udp_host
+        self.udp_port = udp_port
         self._stop = False
 
     def stop(self) -> None:
@@ -727,7 +749,12 @@ class StreamStatusPoller(QtCore.QThread):
     def run(self) -> None:
         while not self._stop:
             try:
-                device = PicoLogicAnalyzer(port=self.port, timeout=0.4)
+                device = PicoLogicAnalyzer(
+                    port=self.port,
+                    timeout=0.4,
+                    udp_host=self.udp_host,
+                    udp_port=self.udp_port,
+                )
                 cstream = device.query("LA:CSTREAM:STAT?")
                 wifi = device.query("COMM:WIFI:STAT?")
                 device.disconnect()
@@ -758,6 +785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_poller: StreamStatusPoller | None = None
         self.wifi_stream_instrument: str | None = None
         self.wifi_stream_command_prefix: str | None = None
+        self.single_wifi_capture_pending = False
         self.last_capture: LogicCapture | ScopeCapture | None = None
         self.channel_checks: list[QtWidgets.QCheckBox] = []
         self.pending_capture: tuple[object, int, str] | None = None
@@ -837,15 +865,22 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.transport_combo, 1)
         row.addWidget(apply_button)
         form.addRow("Data path", row)
+        self.control_combo = QtWidgets.QComboBox()
+        self.control_combo.addItems(["USB CDC", "Wi-Fi TCP"])
+        form.addRow("SCPI control", self.control_combo)
         wifi_status = QtWidgets.QPushButton("Wi-Fi Status")
         wifi_status.clicked.connect(self.query_wifi_status)
         form.addRow(wifi_status)
         self.udp_port = QtWidgets.QSpinBox()
         self.udp_port.setRange(1, 65535)
         self.udp_port.setValue(5005)
+        self.scpi_udp_port = QtWidgets.QSpinBox()
+        self.scpi_udp_port.setRange(1, 65535)
+        self.scpi_udp_port.setValue(5006)
         self.esp_host = QtWidgets.QLineEdit()
         self.esp_host.setPlaceholderText("optional ESP IP")
-        form.addRow("UDP port", self.udp_port)
+        form.addRow("Wave UDP port", self.udp_port)
+        form.addRow("SCPI TCP port", self.scpi_udp_port)
         form.addRow("ESP IP", self.esp_host)
         self.wifi_button = QtWidgets.QPushButton("Start Wi-Fi Receiver")
         self.wifi_button.clicked.connect(self.toggle_wifi_receiver)
@@ -1015,6 +1050,47 @@ class MainWindow(QtWidgets.QMainWindow):
         text = self.port_combo.currentText().strip()
         return text or None
 
+    def selected_esp_host(self) -> str | None:
+        text = self.esp_host.text().strip()
+        return text or None
+
+    def scpi_over_wifi(self) -> bool:
+        return self.control_combo.currentText() == "Wi-Fi TCP"
+
+    def make_logic_device(
+        self,
+        *,
+        timeout: float = 1.0,
+        sys_clock_hz: int | None = None,
+    ) -> PicoLogicAnalyzer:
+        kwargs = {
+            "port": self.selected_port(),
+            "timeout": timeout,
+            "sys_clock_hz": sys_clock_hz if sys_clock_hz is not None else self.sys_clock.value(),
+        }
+        if self.scpi_over_wifi():
+            host = self.selected_esp_host()
+            if not host:
+                raise ValueError("Set ESP IP before using Wi-Fi TCP SCPI control.")
+            kwargs["port"] = None
+            kwargs["udp_host"] = host
+            kwargs["udp_port"] = self.scpi_udp_port.value()
+        return PicoLogicAnalyzer(**kwargs)
+
+    def make_scope_device(self, *, timeout: float = 1.0) -> PicoOscilloscope:
+        kwargs = {
+            "port": self.selected_port(),
+            "timeout": timeout,
+        }
+        if self.scpi_over_wifi():
+            host = self.selected_esp_host()
+            if not host:
+                raise ValueError("Set ESP IP before using Wi-Fi TCP SCPI control.")
+            kwargs["port"] = None
+            kwargs["udp_host"] = host
+            kwargs["udp_port"] = self.scpi_udp_port.value()
+        return PicoOscilloscope(**kwargs)
+
     def logic_config(self) -> dict:
         return {
             "pin_base": self.la_pin_base.value(),
@@ -1043,6 +1119,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_capture()
         if not repeat:
             self.clear_timeline()
+            if self.scpi_over_wifi():
+                self.single_wifi_capture_pending = True
+                self.start_wireless_capture()
+                return
         instrument = "LA" if self.tabs.currentIndex() == 0 else "DSO"
         config = self.logic_config() if instrument == "LA" else self.scope_config()
         self.capture_worker = CaptureWorker(instrument, self.selected_port(), config, repeat)
@@ -1071,7 +1151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_status_poller()
         if self.wifi_stream_instrument is not None:
             try:
-                device = PicoLogicAnalyzer(port=self.selected_port(), timeout=1.0)
+                device = self.make_logic_device(timeout=1.0)
                 if self.wifi_stream_command_prefix == "LA:CSTREAM":
                     device.command("LA:CSTREAM:STOP")
                 elif self.wifi_stream_instrument == "LA":
@@ -1083,24 +1163,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.set_status(f"Stream stop warning: {exc}")
             self.wifi_stream_instrument = None
             self.wifi_stream_command_prefix = None
+            self.single_wifi_capture_pending = False
             self.stream_status_label.setText("Stream: stopped")
         self.repeat_button.setChecked(False)
         self.repeat_button.setText("Repeat")
 
-    def start_wireless_stream(self) -> None:
+    def start_wireless_capture(self) -> None:
         if self.wifi_worker is None:
             self.toggle_wifi_receiver()
 
         instrument = "LA" if self.tabs.currentIndex() == 0 else "DSO"
         try:
-            self.clear_timeline()
             if instrument == "LA":
                 config = self.logic_config()
-                device = PicoLogicAnalyzer(
-                    port=self.selected_port(),
-                    timeout=2.0,
-                    sys_clock_hz=config["sys_clock_hz"],
-                )
+                device = self.make_logic_device(timeout=4.0, sys_clock_hz=config["sys_clock_hz"])
                 device.configure(
                     pin_base=config["pin_base"],
                     pin_count=config["pin_count"],
@@ -1110,7 +1186,47 @@ class MainWindow(QtWidgets.QMainWindow):
                     trigger_level=config["trigger_level"],
                     trigger_mode=config["trigger_mode"],
                 )
-                if self.use_multicore_cstream.isChecked():
+                sequence = device.query("LA:WIFI:READ?", timeout=None)
+            else:
+                config = self.scope_config()
+                device = self.make_scope_device(timeout=4.0)
+                device.configure(
+                    channel=config["dso_channel"],
+                    sample_rate=config["dso_rate"],
+                    samples=config["dso_samples"],
+                    trigger_level=config["dso_trigger_level"],
+                    trigger_mode=config["dso_trigger_mode"],
+                    trigger_slope=config["dso_trigger_slope"],
+                )
+                sequence = device.query("DSO:WIFI:READ?", timeout=None)
+            device.disconnect()
+            self.set_status(f"{instrument} Wi-Fi capture requested ({sequence})")
+        except Exception as exc:
+            self.single_wifi_capture_pending = False
+            self.show_error(str(exc))
+
+    def start_wireless_stream(self, single: bool = False) -> None:
+        if self.wifi_worker is None:
+            self.toggle_wifi_receiver()
+
+        instrument = "LA" if self.tabs.currentIndex() == 0 else "DSO"
+        try:
+            if not single:
+                self.clear_timeline()
+            if instrument == "LA":
+                config = self.logic_config()
+                device = self.make_logic_device(timeout=2.0, sys_clock_hz=config["sys_clock_hz"])
+                device.command("COMM:TRAN WIFI")
+                device.configure(
+                    pin_base=config["pin_base"],
+                    pin_count=config["pin_count"],
+                    samples=config["samples"],
+                    divider=config["divider"],
+                    trigger_pin=config["trigger_pin"],
+                    trigger_level=config["trigger_level"],
+                    trigger_mode=config["trigger_mode"],
+                )
+                if not single and self.use_multicore_cstream.isChecked():
                     if self.append_timeline.isChecked():
                         self.history_limit.setValue(min(self.history_limit.value(), 8))
                         self.display_rate.setValue(min(self.display_rate.value(), 10))
@@ -1120,9 +1236,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     device.stream_start()
                     self.wifi_stream_command_prefix = "LA:STREAM"
+                status = device.query("LA:STREAM:STAT?")
             else:
                 config = self.scope_config()
-                device = PicoOscilloscope(port=self.selected_port(), timeout=2.0)
+                device = self.make_scope_device(timeout=2.0)
+                device.command("COMM:TRAN WIFI")
                 device.configure(
                     channel=config["dso_channel"],
                     sample_rate=config["dso_rate"],
@@ -1133,11 +1251,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 device.command("DSO:STREAM:START")
                 self.wifi_stream_command_prefix = "DSO:STREAM"
+                status = device.query("DSO:STREAM:STAT?")
             device.disconnect()
             self.wifi_stream_instrument = instrument
             if self.wifi_stream_command_prefix == "LA:CSTREAM":
                 self.start_status_poller()
-            self.set_status(f"{instrument} Wi-Fi stream started")
+            self.set_status(
+                f"{instrument} Wi-Fi capture started ({status})"
+                if single
+                else f"{instrument} Wi-Fi stream started ({status})"
+            )
         except Exception as exc:
             self.repeat_button.setChecked(False)
             self.repeat_button.setText("Repeat")
@@ -1153,7 +1276,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_status_poller()
         self.gui_sequence_gaps = 0
         self._last_gui_sequence = None
-        self.status_poller = StreamStatusPoller(self.selected_port())
+        self.status_poller = StreamStatusPoller(
+            self.selected_port(),
+            udp_host=self.selected_esp_host() if self.scpi_over_wifi() else None,
+            udp_port=self.scpi_udp_port.value(),
+        )
         self.status_poller.status_ready.connect(self.on_stream_status_ready)
         self.status_poller.start()
 
@@ -1222,6 +1349,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.scope_next_offset_us = capture.samples * capture.sample_interval_us
                 self.view.plot_scope(capture, sequence)
         self.set_status(f"{instrument} capture {sequence} plotted")
+        if self.single_wifi_capture_pending:
+            self.single_wifi_capture_pending = False
 
     def _append_logic_history(self, sequence: int | None, capture: LogicCapture) -> None:
         if self.logic_history and self.preserve_gaps.isChecked():
@@ -1280,7 +1409,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def identify(self) -> None:
         try:
-            device = PicoLogicAnalyzer(port=self.selected_port(), timeout=1.0)
+            device = self.make_logic_device(timeout=1.0)
             identity = device.identify()
             device.disconnect()
             self.set_status(identity)
@@ -1289,7 +1418,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_transport(self) -> None:
         try:
-            device = PicoLogicAnalyzer(port=self.selected_port(), timeout=1.0)
+            device = self.make_logic_device(timeout=1.0)
             device.command(f"COMM:TRAN {self.transport_combo.currentText()}")
             mode = device.query("COMM:TRAN?")
             device.disconnect()
@@ -1299,7 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def query_wifi_status(self) -> None:
         try:
-            device = PicoLogicAnalyzer(port=self.selected_port(), timeout=1.0)
+            device = self.make_logic_device(timeout=1.0)
             status = device.query("COMM:WIFI:STAT?")
             device.disconnect()
             self.set_status(f"Wi-Fi status {status}")
@@ -1316,7 +1445,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         esp = self.esp_host.text().strip() or None
-        self.wifi_worker = WifiReceiver(port=self.udp_port.value(), esp_host=esp)
+        self.wifi_worker = WifiReceiver(
+            port=self.udp_port.value(),
+            esp_host=esp,
+            esp_control_port=self.scpi_udp_port.value(),
+        )
         self.wifi_worker.max_display_hz = float(self.display_rate.value())
         self.wifi_worker.capture_ready.connect(self.on_capture_ready)
         self.wifi_worker.status.connect(self.set_status)
@@ -1330,7 +1463,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def start_test_signal(self) -> None:
         try:
-            device = PicoLogicAnalyzer(port=self.selected_port(), timeout=1.0)
+            device = self.make_logic_device(timeout=1.0)
             device.start_test_square(self.test_pin.value(), self.test_freq.value())
             device.disconnect()
             self.set_status("Test square started")
@@ -1339,7 +1472,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def stop_test_signal(self) -> None:
         try:
-            device = PicoLogicAnalyzer(port=self.selected_port(), timeout=1.0)
+            device = self.make_logic_device(timeout=1.0)
             device.stop_test_square()
             device.disconnect()
             self.set_status("Test square stopped")
