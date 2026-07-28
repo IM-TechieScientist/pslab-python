@@ -1,0 +1,126 @@
+import pytest
+
+from pslab.pico import PicoDevice, ScpiClient, ScpiError
+
+
+class FakeTransport:
+    def __init__(self):
+        self.output = bytearray()
+        self.writes = []
+        self.timeout = 1.0
+        self.closed = False
+        self.connected = False
+
+    def connect(self):
+        self.connected = True
+
+    def close(self):
+        self.closed = True
+
+    def read(self, size):
+        data = self.output[:size]
+        del self.output[:size]
+        return bytes(data)
+
+    def readline(self):
+        try:
+            end = self.output.index(ord("\n")) + 1
+        except ValueError:
+            end = len(self.output)
+        return self.read(end)
+
+    def write(self, data):
+        self.writes.append(data)
+        command = data.strip().decode("ascii")
+        responses = {
+            "*IDN?": b"FOSSASIA,PSLab Pico,1.0,v0.1.0\n",
+            "SYST:ERR:COUN?": b"1\n",
+            "SYST:ERR?": b"-113,\"Undefined header\"\n",
+            "COMM:TRAN?": b"USB\n",
+            "COMM:WIFI:STAT?": b"1,12,3,4\n",
+        }
+        if command == "LA:READ?":
+            payload = b"abcd"
+            self.output.extend(b"#14" + payload + b"\n")
+        elif command == "BAD:BLOCK?":
+            self.output.extend(b"-200,\"Execution error\"\n")
+        elif command in responses:
+            self.output.extend(responses[command])
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def reset_input_buffer(self):
+        self.output.clear()
+
+
+def test_query_writes_newline_and_reads_text_response():
+    transport = FakeTransport()
+    client = ScpiClient(transport)
+
+    response = client.query("*IDN?")
+
+    assert response == "FOSSASIA,PSLab Pico,1.0,v0.1.0"
+    assert transport.writes == [b"*IDN?\n"]
+
+
+def test_command_rejects_query_commands():
+    client = ScpiClient(FakeTransport())
+
+    with pytest.raises(ValueError):
+        client.command("*IDN?")
+
+
+def test_command_sends_silent_command():
+    transport = FakeTransport()
+    client = ScpiClient(transport)
+
+    client.command("*RST")
+
+    assert transport.writes == [b"*RST\n"]
+
+
+def test_query_block_reads_definite_length_payload():
+    client = ScpiClient(FakeTransport())
+
+    payload = client.query_block("LA:READ?")
+
+    assert payload == b"abcd"
+
+
+def test_query_block_raises_scpi_error_when_response_is_text_error():
+    client = ScpiClient(FakeTransport())
+
+    with pytest.raises(ScpiError, match="Execution error"):
+        client.query_block("BAD:BLOCK?")
+
+
+def test_system_error_parses_code_and_message():
+    client = ScpiClient(FakeTransport())
+
+    code, message = client.system_error()
+
+    assert code == -113
+    assert message == "Undefined header"
+
+
+def test_transport_helpers_parse_status_values():
+    transport = FakeTransport()
+    client = ScpiClient(transport)
+
+    client.set_transport("wifi")
+    assert client.get_transport() == "USB"
+    assert client.wifi_status() == (True, 12, 3, 4)
+    assert b"COMM:TRAN WIFI\n" in transport.writes
+
+
+def test_pico_device_wraps_scpi_client():
+    transport = FakeTransport()
+    device = PicoDevice.from_transport(transport)
+
+    with device:
+        assert device.identify() == "FOSSASIA,PSLab Pico,1.0,v0.1.0"
+
+    assert transport.connected
+    assert transport.closed
