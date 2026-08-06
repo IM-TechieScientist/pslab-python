@@ -343,6 +343,16 @@ class ScpiClient:
             return
         if not char:
             return
-        if char in (b"\n", b"\r"):
+        if char == b"\n":
             return
+        if char == b"\r":
+            try:
+                next_char = self.transport.read(1)
+            except TimeoutError:
+                return
+            if not next_char or next_char == b"\n":
+                return
+            raise ScpiError(
+                f"Unexpected SCPI block terminator byte: {next_char!r}"
+            )
         raise ScpiError(f"Unexpected SCPI block terminator byte: {char!r}")

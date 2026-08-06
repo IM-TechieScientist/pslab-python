@@ -145,6 +145,25 @@ def test_query_block_rejects_unexpected_terminator():
         client.query_block("CUSTOM:BLOCK?")
 
 
+@pytest.mark.parametrize("terminator", [b"\n", b"\r", b"\r\n"])
+def test_query_block_accepts_line_terminator_variants(terminator):
+    transport = FakeTransport()
+    transport.output.extend(b"#14abcd" + terminator)
+    client = ScpiClient(transport)
+
+    assert client.query_block("CUSTOM:BLOCK?") == b"abcd"
+    assert transport.output == bytearray()
+
+
+def test_query_block_rejects_unexpected_byte_after_carriage_return():
+    transport = FakeTransport()
+    transport.output.extend(b"#14abcd\rX")
+    client = ScpiClient(transport)
+
+    with pytest.raises(ScpiError, match="Unexpected SCPI block terminator"):
+        client.query_block("CUSTOM:BLOCK?")
+
+
 def test_query_block_raises_scpi_error_when_response_is_text_error():
     client = ScpiClient(FakeTransport())
 
