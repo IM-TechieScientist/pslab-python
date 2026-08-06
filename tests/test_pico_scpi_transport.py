@@ -1,6 +1,14 @@
+import socket
+
 import pytest
 
-from pslab.pico import PicoDevice, ScpiClient, ScpiError
+from pslab.pico import (
+    PicoDevice,
+    PicoWifiTransport,
+    ScpiClient,
+    ScpiError,
+    ScpiTimeoutError,
+)
 
 
 class FakeTransport:
@@ -53,6 +61,35 @@ class FakeTransport:
 
     def reset_input_buffer(self):
         self.output.clear()
+
+
+class FakeSocket:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.recv_sizes = []
+        self.timeout = None
+        self.connected_to = None
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def connect(self, address):
+        self.connected_to = address
+
+    def recv(self, size):
+        self.recv_sizes.append(size)
+        if not self.chunks:
+            return b""
+        chunk = self.chunks.pop(0)
+        if isinstance(chunk, BaseException):
+            raise chunk
+        return chunk
+
+    def sendall(self, data):
+        self.sent = data
+
+    def close(self):
+        self.closed = True
 
 
 def test_query_writes_newline_and_reads_text_response():
@@ -124,3 +161,34 @@ def test_pico_device_wraps_scpi_client():
 
     assert transport.connected
     assert transport.closed
+
+
+def test_wifi_read_zero_returns_empty_without_socket_read():
+    transport = PicoWifiTransport("example.test")
+    transport._socket = FakeSocket([b"unexpected"])
+
+    assert transport.read(0) == b""
+    assert transport._socket.recv_sizes == []
+
+
+def test_wifi_read_rejects_negative_size():
+    transport = PicoWifiTransport("example.test")
+
+    with pytest.raises(ValueError):
+        transport.read(-1)
+
+
+def test_wifi_read_wraps_socket_timeout():
+    transport = PicoWifiTransport("example.test")
+    transport._socket = FakeSocket([socket.timeout()])
+
+    with pytest.raises(ScpiTimeoutError):
+        transport.read(1)
+
+
+def test_wifi_readline_wraps_socket_timeout():
+    transport = PicoWifiTransport("example.test")
+    transport._socket = FakeSocket([socket.timeout()])
+
+    with pytest.raises(ScpiTimeoutError):
+        transport.readline()

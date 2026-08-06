@@ -167,9 +167,17 @@ class PicoWifiTransport(PicoTransport):
         self._rx_buffer.clear()
 
     def read(self, size: int) -> bytes:
+        if size < 0:
+            raise ValueError("size must be non-negative.")
+        if size == 0:
+            return b""
+
         self.connect()
         while len(self._rx_buffer) < size:
-            chunk = self._socket.recv(max(1, size - len(self._rx_buffer)))
+            try:
+                chunk = self._socket.recv(size - len(self._rx_buffer))
+            except socket.timeout as exc:
+                raise ScpiTimeoutError("Timed out waiting for SCPI TCP data.") from exc
             if not chunk:
                 raise ScpiTimeoutError("SCPI TCP connection closed.")
             self._rx_buffer.extend(chunk)
@@ -180,7 +188,10 @@ class PicoWifiTransport(PicoTransport):
     def readline(self) -> bytes:
         self.connect()
         while b"\n" not in self._rx_buffer:
-            chunk = self._socket.recv(4096)
+            try:
+                chunk = self._socket.recv(4096)
+            except socket.timeout as exc:
+                raise ScpiTimeoutError("Timed out waiting for SCPI TCP line.") from exc
             if not chunk:
                 raise ScpiTimeoutError("SCPI TCP connection closed.")
             self._rx_buffer.extend(chunk)
