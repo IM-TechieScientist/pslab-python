@@ -126,6 +126,25 @@ def test_query_block_reads_definite_length_payload():
     assert payload == b"abcd"
 
 
+def test_query_block_allows_missing_terminator():
+    transport = FakeTransport()
+    transport.output.extend(b"#14abcd")
+    client = ScpiClient(transport)
+
+    payload = client.query_block("CUSTOM:BLOCK?")
+
+    assert payload == b"abcd"
+
+
+def test_query_block_rejects_unexpected_terminator():
+    transport = FakeTransport()
+    transport.output.extend(b"#14abcdX")
+    client = ScpiClient(transport)
+
+    with pytest.raises(ScpiError, match="Unexpected SCPI block terminator"):
+        client.query_block("CUSTOM:BLOCK?")
+
+
 def test_query_block_raises_scpi_error_when_response_is_text_error():
     client = ScpiClient(FakeTransport())
 

@@ -341,7 +341,8 @@ class ScpiClient:
             char = self.transport.read(1)
         except TimeoutError:
             return
+        if not char:
+            return
         if char in (b"\n", b"\r"):
             return
-        # The firmware emits a newline after blocks. If a different byte appears,
-        # leave higher-level code to catch the protocol mismatch on the next read.
+        raise ScpiError(f"Unexpected SCPI block terminator byte: {char!r}")
