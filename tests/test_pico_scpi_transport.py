@@ -18,6 +18,7 @@ class FakeTransport:
         self.timeout = 1.0
         self.closed = False
         self.connected = False
+        self.transport_mode = "USB"
 
     def connect(self):
         self.connected = True
@@ -44,12 +45,15 @@ class FakeTransport:
             "*IDN?": b"FOSSASIA,PSLab Pico,1.0,v0.1.0\n",
             "SYST:ERR:COUN?": b"1\n",
             "SYST:ERR?": b"-113,\"Undefined header\"\n",
-            "COMM:TRAN?": b"USB\n",
             "COMM:WIFI:STAT?": b"1,12,3,4\n",
         }
         if command == "LA:READ?":
             payload = b"abcd"
             self.output.extend(b"#14" + payload + b"\n")
+        elif command.startswith("COMM:TRAN "):
+            self.transport_mode = command.split(" ", 1)[1]
+        elif command == "COMM:TRAN?":
+            self.output.extend(f"{self.transport_mode}\n".encode("ascii"))
         elif command == "BAD:BLOCK?":
             self.output.extend(b"-200,\"Execution error\"\n")
         elif command in responses:
@@ -185,7 +189,7 @@ def test_transport_helpers_parse_status_values():
     client = ScpiClient(transport)
 
     client.set_transport("wifi")
-    assert client.get_transport() == "USB"
+    assert client.get_transport() == "WIFI"
     assert client.wifi_status() == (True, 12, 3, 4)
     assert b"COMM:TRAN WIFI\n" in transport.writes
 
